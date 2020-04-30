@@ -1,0 +1,555 @@
+---
+title: '**Comparative effectiveness of antiepileptic combination therapy based on mode of action**'
+author: "Emadeldin Hassanin, Roland Krause"
+date: "29/12/2018"
+output:
+  bookdown::pdf_book:
+    latex_engine: xelatex
+    template: null
+    includes:
+      in_header: mystyle.sty
+bibliography: Project_references.bib
+documentclass: scrreprt
+fig_caption: yes
+fontsize: 12pt
+csl: nature.csl
+site: bookdown::bookdown_site
+always_allow_html: yes
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, error = FALSE, message = FALSE, options(digits = 3))
+```
+
+
+```{r loading Packages, include=FALSE}
+# Loading packages
+library(tidyverse)
+library(lubridate)
+library(DescTools)
+library(data.table)
+library(timetools)
+library(eeptools)
+library(DiagrammeR)
+library(knitr)
+library(survival)
+library(survminer)
+library(bookdown)
+library(kableExtra)
+```
+
+```{r loading data, include=FALSE, cache=TRUE}
+source("load.epipgx.tables.R")
+#change formate to numeric first then to date
+AED$D108_START_date = as.Date(as.numeric(AED$D108_START_date), origin = "1900-01-01") 
+AED$D113_END_date = as.Date(as.numeric(AED$D113_END_date), origin = "1900-01-01") 
+SUBJECT$S158_LATEST_VISIT_date = as.Date(as.numeric(SUBJECT$S158_LATEST_VISIT_date), origin = "1900-01-01")
+SUBJECT$S108_DOB_DATE = as.Date(as.numeric(SUBJECT$S108_DOB_DATE), origin = "1900-01-01")
+```
+
+```{r preparing data, echo=FALSE, cache=TRUE}
+## change End_date  with Last visit date if D113_END_date= NA and  D115_END_NA = "AED tx ongoing"
+AED %>%     
+  left_join(SUBJECT %>% filter(S158_LATEST_VISIT_date > 0) %>% select(S_PKEY, S158_LATEST_VISIT_date), 
+            by = c("S_FKEY"="S_PKEY")) %>% 
+  mutate(end_date = case_when(
+    is.na(D113_END_date) & str_detect(D115_END_NA, "ongoing") ~ S158_LATEST_VISIT_date, 
+    TRUE ~ D113_END_date)) %>% 
+  select(S_FKEY,D103_SUBJ_DOB,D120_AED_GENERIC_ABBREV, D108_START_date,end_date,D120_AED_GENERIC_ABBREV,D115_END_NA,D140_OUTCOME,t_140_OUTCOME_2)  -> aed_tmp
+
+#patients have more than one trial
+
+#aed_tmp %>% group_by(S_FKEY) %>% summarize(aed_count = n()) %>% filter(aed_count > 1) %>% nrow
+
+```
+
+```{r extracting data, echo=FALSE, cache=TRUE}
+#joining to obtain drug combinations 
+#calculate the interval of each ttt combination in days, choose which more than zero
+#find the intersect between two drugs in each row
+#calculte interval of final ttt combination
+#filter concomitant therapy > 90 days
+aed_tmp %>% 
+  inner_join(aed_tmp ,
+             by="S_FKEY" ) %>% 
+  filter(D108_START_date.x <= D108_START_date.y & D120_AED_GENERIC_ABBREV.x != D120_AED_GENERIC_ABBREV.y) %>% 
+  #mutate(interval = D108_START_date.y - end_date.x) -> aed_tmp
+  mutate(int_days = end_date.x - D108_START_date.y) %>% 
+  filter(int_days > 0 ) %>% 
+  mutate(ovr_interval = lubridate::intersect(lubridate::interval(D108_START_date.x,end_date.x),
+                                      lubridate::interval(D108_START_date.y,end_date.y))) %>% 
+  mutate(start_ovr = int_start(ovr_interval)) %>% 
+  mutate(end_ovr = int_end(ovr_interval)) %>% 
+  mutate(int_days = difftime(int_end(ovr_interval),int_start(ovr_interval), units = "day")) %>% 
+  select(-ovr_interval) %>% 
+  filter(int_days > 90)-> aed_tmp
+
+#aed_tmp %>% group_by(S_FKEY) %>% summarize(n())  %>% nrow 
+```
+
+```{r classification by MOA , echo = FALSE}
+
+#assign AED to its MOA
+
+aed_moa <- tribble(
+  ~D120_AED_GENERIC_ABBREV, ~MOA, ~Desc,
+  "LEV" , "SV" , "synaptic vesicle potein 2A",
+  "LCM" , "SCB" , "sodium channel blocker",
+  "LTG" , "SCB" , "sodium channel blocker",
+  "OXC" , "SCB" , "sodium channel blocker",
+  "PHT" , "SCB" , "sodium channel blocker",
+  "ETN" , "SCB" , "sodium channel blocker",
+  "ESL" , "SCB" , "sodium channel blocker",
+  "CBZ" , "SCB" , "sodium channel blocker",
+  "CLB" , "GA" , "gaba analog",
+  "CNZ" , "GA" , "gaba analog",
+  "PB" , "GA" , "gaba analog",
+  "GBP" , "GA" , "gaba analog",
+  "VGB" , "GA" , "gaba analog",
+  "PGB" , "GA" , "gaba analog",
+  "PRM" , "GA" , "gaba analog",
+  "TGB" , "GA" , "gaba analog",
+  "DZP" , "GA" , "gaba analog",
+  "LZP" , "GA" , "gaba analog",
+  "NZP" , "GA" , "gaba analog",
+  "ZNS" , "MM" , "multiple mechanisms",
+  "VPA" , "MM" , "multiple mechanisms",
+  "FBM" , "MM" , "multiple mechanisms",
+  "TPM" , "MM" , "multiple mechanisms"
+)
+
+aed_tmp %>% 
+  left_join(aed_moa , by = c("D120_AED_GENERIC_ABBREV.x" = "D120_AED_GENERIC_ABBREV")) %>% 
+  left_join(aed_moa, by = c("D120_AED_GENERIC_ABBREV.y" = "D120_AED_GENERIC_ABBREV")) %>% 
+  filter(!is.na(MOA.x),!is.na(MOA.y)) %>%
+  rowwise %>%
+  mutate(key = paste(sort(c(MOA.x, MOA.y)), collapse="+")) -> aed_final
+
+```
+
+```{r unique combination function, include=FALSE, cache=TRUE}
+#function to remove duplicates of AED combination
+uniquecomb <- function(aed_final) {
+  aed_mono <- aed_final %>% split(aed_final$S_FKEY) #split according to subjects
+   for(l in 1:length(aed_mono)){
+    aed_mono[[l]] <- as.data.frame(aed_mono[[l]]) %>% 
+      rowwise %>%  #grouping by row
+      mutate(temp = paste(sort(c(D120_AED_GENERIC_ABBREV.x, D120_AED_GENERIC_ABBREV.y)), collapse="")) %>%  #sort names of each drug combination(each row)
+      distinct(temp, .keep_all=T) #%>%  #filter unique sorted combination
+        #select(-temp) 
+  }
+  aed_mono <- do.call("rbind",aed_mono)
+  return(aed_mono)
+}
+```
+
+```{r unique combination, include=FALSE, cache=TRUE}
+aed_final <- uniquecomb(aed_final)
+aed_final %>% group_by(S_FKEY) %>% summarize(n())  %>% nrow 
+```
+
+```{r final data , echo = FALSE, fig.width=3, fig.height=4}
+#join to obtain date of birth and gender 
+#calculate age when patient start combination
+
+aed_final %>%     
+  left_join(SUBJECT %>% filter(!is.na(S108_DOB_DATE)) %>% select(S_PKEY, S108_DOB_DATE,S103_GENDER), 
+  by = c("S_FKEY"="S_PKEY")) %>% 
+  mutate(dob = S108_DOB_DATE)  %>% 
+  filter(!is.na(dob)) %>% 
+  filter(dob < D108_START_date.x) %>% 
+  mutate(start_date = D108_START_date.x)  %>% 
+  mutate(age = age_calc(dob, enddate = start_date, units = "years")) %>% #end date need to be determined 
+  filter(!is.na(S103_GENDER)) -> aed_final
+```
+
+\newpage
+
+# Preamble
+
+This study describes antiepileptic drug (AED) combination therapy based on their mode of action (MOA) in a European cohort, and evaluates the differences in outcomes comparing different-MOA combination therapy with same-MOA combination therapy of patients with epilepsy. The objective of this study is to reproduce results and methods of Zhixiao et al. paper, 2014[@Investigation2015], but in a European cohort. Zhixiao et al. study was performed on an American cohort of 90,000 patient with the aim of testing whether MOA-based AED combination are more effective than non-MOA-based AEDs combinations, and specifically whether different-MOA-based AEDs combination are more effective than same-MOA-based. The comparative effectiveness among AEDs combinations was assessed by the persistence of the medications. 
+
+\newpage
+
+# Introduction 
+
+##	General overview
+
+Epilepsy is one of the most common neurological disorders that affects people of all ages, yet information about the disease pathophysiology is incomplete and thus, the treatment rationale as well. According to WHO, approximately 50 million people suffer from epilepsy, and nearly 80% of them live in low income countries[@WHOFactSheet]. Although antiepileptic drugs (AEDs) can effectively control seizures in about 70% of patients with epilepsy, approximately 30% of those patients have intractable seizures that are difficult to manage. Therefore, many attempts have been made to define, and classify epilepsy, which is supposed to help clinicians to better understand the disease and try to find different drug combination accordingly. 
+
+##	Definitions and classification
+
+International League Against Epilepsy (ILAE) has come to a general consensus on definition and classification of epilepsy during the last decades. In 2005, the ILAE defined: epileptic seizures as “a transient occurrence of signs and/or symptoms due to abnormal excessive or synchronous neuronal activity in the brain”, and epilepsy as “a disorder of the brain characterized by an enduring predisposition to generate epileptic seizures and by the neurobiologic, cognitive, psycho- logical, and social consequences of this condition” and that definition of epilepsy requires the occurrence of at least one epileptic seizure[@Fisher2005]. In 2014, the ILAE release more practical epilepsy identification (diagnosis) if any of the following condition exist. First condition, epilepsy can exist if two or more unprovoked seizures occur with 24 hours – day - difference (old definition). The second condition, they modified the first one and a new condition added which is epilepsy can exist if one unprovoked seizure occur with a high risk of another (>60%). The third condition, this addresses the diagnosis of epilepsy syndrome[@Delange2018; @Fisher2014]. In 2017, the ILAE based the latest epilepsy classification according to the onset of seizures: if they are locally (focal), generalized or no clear onset (unknown). Focal seizures occur when abnormal electrical activity originate from limited area (one hemisphere) which may then distributed to the second hemisphere. Generalized onset seizures are defined when the point of origination is involved in rapidly engaging, bilaterally distributed networks. Unknown seizures onset due to lack of information which can be then reclassified as focal or generalized with the availability of evidence. The three types can then subdivide into motor and non-motor symptoms; motor symptoms include: tonic, clonic, tonic-clonic, myoclonic, atonic, and epileptic spasms; while non-motor symptoms include: typical absence, atypical absence, myoclonic absence; and finally, only focal seizures can further be subdivided according to level of consciousness (awareness).  The ILAE classification provides a common platform for healthcare practitioners to work towards a better understanding of the underlying etiologies of epilepsy heterogeneity.
+
+There has been an enormous expansion in our perception of the different etiologies of epilepsy. The availability of modern diagnosis methods has led to this increase in understanding about causation, such as a specific pattern found in an electroencephalogram (EEG); neuroimaging as computed tomography (CT) scan and magnetic resonance imaging (MRI) or genetic studies. In 2017, the ILAE classification of the etiology of epilepsy is divided into six subgroups to consider potential treatment implications: Structural, Genetic, Infectious, Metabolic, Immune, and Unknown. Structural etiology refers to the abnormalities shown in the neuroimaging findings together with clinical assessment, which provides reasonable evident in the seizure’s causes.  These abnormalities may be genetic in their basis, infectious or acquired, such as from a stroke or trauma. There is association between the structural imaging finding and therapy response for instance, the frequent finding of mesial temporal lobe seizures with hippocampal sclerosis is reported to be associated with therapeutics fail. Genetic basis etiology that results from direct gene mutations is not common in epilepsy or genes are yet unknown. Most of the family cases are autosomal dominant disorders, such as mutations in potassium channel genes. Sequencing technology provides a better understanding of heterogeneity of different epilepsy syndromes. Infectious etiology is the most common etiology which occurs as a result of different types of infections that could be bacterial or viral. Metabolic etiology refers to a range of metabolic disorders which is associated with a high risk of seizure development. There are metabolic disorders that can cause seizures, such as cerebral folate deficiency, creatine disorders, and pyridoxine-dependent epilepsy. The identification of an exact metabolic disorder will be crucial for treatment as most of these diseases need diet modification and supplements besides the use of anti-epileptic drugs. Immune etiologies of epilepsy are discussed in recent studies, mostly including autoimmune diseases. Unknown etiology refers to the fact that there is no evidence known to cause the seizures. It is crucial to highlight the identification, classification and etiology for each patient because this enables effective treatment management[@Scheffer2017] (Figure \@ref(fig:Figure1)). Today, because of this diversity in etiologies, researchers concentrate on pinpointing the cause of the disease in each patient; hence the discovery of efficient treatment for refractory epilepsies cases. 
+
+```{r Figure1,fig.height=.2, fig.width=0.5, fig.cap="Summary of the ILAE 2017  classification of seizures, epilepsies types, and etiology of epilepsy[@Scheffer2017]."  }
+include_graphics("images/Figure1.png")
+
+```
+
+## Anti-epileptic drugs 
+
+
+### Introduction
+
+Although anti-epileptic drugs (AEDS) can control seizures in approximately 70% of patients with one medication, patients may need more medications to control seizures, and some patients may never obtain seizure control. Epilepsy originates from several mechanisms which have the same clinical manifestation an occasional and excessive discharge of cerebral neurons, and this leads to recurrent seizures. A seizure is a clinical manifestation of an imbalance between both excitatory and inhibitory processes of neuronal network in the brain, this alteration of electrical activity causes neuronal hyperexcitability. For example, exacerbation of excitatory neuronal axons or the loss of inhibitory can augment the neuronal excitability. Countless neuronal interactions occur by transmitting waves of electrical excitation which are known as an action potential[@Kress2010]. The synchronization between the closing and opening of ion channels organizes the action potential, and causes the transmission of these signals to the postsynaptic neurons[@AmericanEpilepsySociety2006]. 
+
+In presynaptic neurons, a normal resting neuronal membrane is slightly more negatively charged intracellular than outside. For the excitatory process, action potential starts when voltage-gated sodium channels open, followed by the opening of voltage-gated calcium channels. This triggers the release of glutamate (excitatory neurotransmitter) from vesicles towards the synaptic cleft and makes the intracellular potential less negative or more positive by the influx of Na+ and Ca++ ions, depolarizing the cell. In postsynaptic neurons, further depolarization occurs by the glutamate which is released from presynaptic vesicles, and triggers the Na+ and Ca++ influx through AMPA and NMDA receptors, respectively. For the inhibitory process, GABA (inhibitory neurotransmitter) binds its receptors and triggers opening of chloride channels and the influx of Cl-, this makes the intracellular potential more electrically negative, hyperpolarizing the cell. Any alteration in the excitatory or inhibitory neurotransmission; including neurotransmitters, receptors, or ion channels can results in neuronal hyperexcitability. AEDs work by decreasing the electrical activity of the brain, either by inhibiting excitatory process or promoting inhibition process including different modes of action[@Stafstrom2015]. 
+
+### Mode of action 
+
+AEDs reduce seizures through different modes of action which can be categorized into: (1) Modulating voltage-gated channels either by blocking such as sodium, and calcium channels, or enhancing such as potassium channels. (2) Enhancement of GABA inhibition either acting on GABAA receptors, GAT1 which is GABA transporter, or GABA transaminase. (3)  Modulating synaptic release vesicles through SV2A. (4) This category includes drugs which have multiple modes of action. The aim of these interactions is to control abnormal inhibitory or excitatory neurotransmission[@Brodie2010; @Johannessen2010; @Rogawski2016]. Summary of AEDs used for EpiPGX cohort and their adverse effects are shown in (Table \@ref(tab:Table1)).
+
+Table: (\#tab:Table1) Summary of antiepileptic drugs, and the most common adverse effect in EpiPGX cohort. 
+
+| Mode of action          | Drug                      | Adverse effect (most common)                               |
+|-------------------------|---------------------------|------------------------------------------------------------|
+| Sodium channel blocker  | Carbamazepine             | Hyponatremia                                               |
+|                         | Oxcarbazepine             | Hyponatremia                                               |
+|                         | Phenytoin                 | Narrow therapeutic index, Gingival hyperplasia, Depression |
+|                         | Lamotrigine               | Risk of rash                                               |
+|                         | Lacosamide                |                                                            |
+| 
+Calcium channel blocker | Ethosuximide              |                                                            |
+| 
+GABA analogs            | Benzodiazepines           | Tolerance                                                  |
+|                         | Gabapentin                | Weight gain                                                |
+|                         | Pregabalin                | Weight gain, edema                                         |
+|                         | Tiagabine                 | Seizures                                                   |
+|                         | Vigabatrin                | Visual field loss                                          |
+|                         | Phenobarbital & Primidone | Confusion                                                  |
+| 
+SV2A binding            | Levetiracetam             | Behavioral disorder                                        |
+| 
+Multiple mechanisms     | Valporate & Divalproex    | Weight gain, Hair loss, Hepatotoxicity, Teratogenicity     |
+|                         | Topiramate                | Cognitive impairment, Weight- loss, speech disorder        |
+
+
+
+### Therapeutic indication
+
+Choice of the therapy is based on classification of the seizures, and patient-characteristics (age, sex, and lifestyle). In newly diagnosed patients, clinicians choose a drug appropriate for the patient’s type of seizure (focal or generalized). The first-choice therapy is always monotherapy that exhibit better medication adherence and fewer side effects compared to combination therapy. If this drug is associated with adverse effects or does not control the seizures, second-choice drug should be added before tapering the original one. If seizures are not controlled with monotherapy, adjunctive AED should be considered. Table 2 describes potential therapeutic strategies for managing newly diagnosed epilepsy based on previous studies and pharmacological reviews[@Conway2014; @Goldenberg2010; @Marson2007; @SubcommitteeoftheAmericanAcademyofNeurology2018].
+
+## Survival analysis
+
+Survival analysis is a set of statistical approaches for analysing data where the outcome is the time until an event of interest occurs, time-to-event analysis. In clinical trials data, the event of interest can be death, occurrence of disease, relapse, or drug persistence. Survival time is the time to the event which can be measured in days, weeks, or years. For example, if the event of interest is disease relapse, then the survival time can be time in weeks until patient experience disease recurrence[@Kartsonaki2016]. 
+
+In survival analysis, subjects are usually followed over a preidentified time period and the focus is on time when the event of interest occurs, and when information about this survival time is incomplete, this is described as censored. A subject who does not experience the event of interest for the duration of study, or drops out of the study is defined as right censored. That means, survival analysis considers survival time for these subject either until the date of last follow up or last time point if the subject does not experience the event of interest.  Thus, Survival analysis considers correctly information for both censored and uncensored data[@Bradburn2003]. 
+
+Survival analysis has two dependent variables which are time to the event, and the other is the event. Then, one can describe the distribution of event times by two functions, survival and hazard function. Survival function gives, for every time, the probability for surviving to that time point. Hazard function gives the potential that event will occur for individuals which are surviving at a specific time. In general, survival studies are used to describe the relationship of a factor of interest (e.g. treatment) to the time to event, in the presence of multi-covariates, such as age, gender, and race. A number of models are available for survival analysis to predict the relationship of a set of predictor variables with the survival time. Methods include different approaches such as parametric, non-parametric and semiparametric. Survival data has a skewed distribution, and the Kaplan Meier estimator is widely used as a nonparametric estimator. It can be used to obtain a univariate descriptive statistical analysis of survival data, and describes the survival with respect to the factor under explanation and ignore other factors that might influence survival time. For handling multiple explanatory variables, semiparametric models as Cox proportional hazard model is widely used. In summary, the statistical output for a Kaplan- Meier analysis provides a visual representation of predicted survival curves, while the Cox proportional hazard model provides hazard ratios to assess the hazardous event during the study interval[@Jager2008].
+
+# Methods
+
+## Data Source 
+
+Clinical trials data were collected from a European database of patients with epilepsy (EpiPGX). The EpiPGX dataset was collected by participating centres, and it involves more than 13000 patients with around 40000 drug trials. EpiPGX is a Pharmacogenomics project designed for identifying genome-based biomarkers with the aim to individualise treatment of epilepsy, pinpoint different etiologies of epilepsy, discover new AED targets, and improve the use of current AEDs. The dataset is available for research purposes, and all patients provided a documented consent. 
+
+## Study population
+
+Patients had been receiving a monotherapy prior to the initiation of addon AED, and some patients had been trying more than 2 AEDs. We excluded patients received monotherapy and identified only patients recieved two or more AEDs initiated between June 2, 1933, and March 11, 2015. We selected `r aed_final %>% group_by(S_FKEY) %>% summarize(n())  %>% nrow` patients with concomitant use of two or more AEDs for more than 90 days. The cut off of 90 days was based on previous studies including Zhixiao’s one (Figure \@ref(fig:Figure2)). Concomitancy was identified by number of days overlapped with continuous use of the second AED.  
+
+```{r fig1}
+mermaid(diagram = '   
+gantt
+    title Patient with S_FKEY "S_1000004"
+    title Patient trials
+    dateFormat  YYYY-MM-DD
+    section drug trials
+    VPA     :1998-07-02 , 2009-07-02
+    LTG     :2001-04-17 , 2014-04-03
+    ESM     :1999-07-02 , 2002-07-02
+    CNZ     :2002-07-02 , 2003-05-17
+    TPM     :2003-07-02 , 2004-07-02
+')
+```
+
+
+```{r Figure2,fig.height=.2, fig.width=0.5, fig.cap="Flow chart for data filtering."}
+include_graphics("images/flowchart.png")
+```
+
+## AED combination
+
+AEDs are categorized into four main groups based on their MOA and each drug was assigned to one group. The four categories are synaptic vesicle protein 2A binding (SV), sodium channel blocker (SCB), GABA analog (GA), and multiple mechanisms (MM). (\#tab:Table2)
+
+In addition, nine AED combination categories are considered, three of them have  same-MOA combination (SCA+SCA, GA+GA, and MM+MM), while the other six have different-MOA combination (GA+MM, GA+SCB, GA+SV, MM+SCB, MM+SCB, and SCB+SV). Only AED combination with more than 50 clinical trials was considered. MM+MM category was excluded because the heterogeneity of MOA made outcomes difficult to interpret. 
+
+Table: (\#tab:Table2) Antiepileptic drugs by model of action.
+
+| Mechanism of action                      | Antiepileptic drugs                                                                                                               |
+|------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------|
+| Sodium channel blocker (SCB)             | Lacosamide, lamotrigine, oxcarbazepine, phenytoin, carbamazepine, ethotoin, and eslicarbazepine                                   
+                                                              |
+| GABA analog (GA)                         | Clobazam, Clonazepam, phenobarbital, gabapentin, vigabatrin, pregabalin, diazepam, tiagabine, lorazepam, nitrazepam and primidone 
+                                                              |
+| Synaptic vesicle protein 2A binding (SV) | Levetiracetam                                                                                                                     |
+| Multiple mechanisms (MM)                 | Zonisamide, valproate, felbamate, topiramate                                                                                      |
+## Outcome variables
+
+
+### Drug persistence
+
+The comparative effectiveness among AEDs combinations was assessed by the persistence of the medications. Drug persistence is the treatment duration of each AED combination which was measured as the number of days from the start date of receiving AED combination to the last date, the last date for discontinuation of AED combination, or the last visit date for the cases with ongoing treatment. Finally, we calculated the mean and median drug persistence for all AED combination. 
+
+### Demographic variables
+
+Number of patients, therapy trials were calculated per each AED combination. Demographic variables were measured such as age and sex.  
+
+### Survival analysis
+
+In this study, both the Kaplan-Meier and the Cox proportional hazard model were used to evaluate the persistence of AEDs combinations. Two models were built, one is for GA combination trials with reference “GA+GA”, and other is for SCB combination trials with reference “SCB + SCB”. In these models, same-MOA combination was chosen as the reference group to compare between same-MOA and different-MOA combinations in each model. Finally, Kaplan-Meier analysis provides survival curves and median persistent time (duration of time from initiation to 50% probability of continuing the treatment), while Cox proportional hazard model provides hazard ratios. Analyses were conducted in Rstudio using R program version 3.5.0.
+
+
+# Results
+
+
+## Study sample
+```{r monotrialfrequencies}
+#assign AED to its MOA
+
+AED %>% 
+  left_join(aed_moa , by = c("D120_AED_GENERIC_ABBREV" = "D120_AED_GENERIC_ABBREV")) %>% 
+  filter(!is.na(MOA)) %>% 
+  count(MOA) %>% mutate(per = n/sum(n)*100) -> aed_monotrials
+aed_monotrials %>%
+  kable(format = "pandoc", 
+        caption = "Frequencies of MOA-based trials among EpiPGX's study patients. GA indicate gamma-aminobutyric acid analogs; SCB, sodium channel blockers; MM, multiple mechanisms; and SV, synaptic vesicle protein 2A binding; and MOA, mode of action.", 
+        col.names = c("Mode of action","Trials","percentage"))
+```
+
+The whole EpiPGX study cohort consisted of 13019 patients with more than 40,000 AEDs trials. The frequencies of MOA-based AEDs trials in this cohort, from the most to least frequently used, were SCB (`r aed_monotrials %>% filter(MOA == "SCB") %>% pull("per")`%), MM (`r aed_monotrials %>% filter(MOA == "MM") %>% pull("per")`%), GA (`r aed_monotrials %>% filter(MOA == "GA") %>% pull("per")`%), SV (`r aed_monotrials %>% filter(MOA == "SV") %>% pull("per")`%) (Table \@ref(tab:monotrialfrequencies)). 
+
+
+
+## Patient characteristics
+
+Demographic details of the patient cohort are presented in table 2. Mean age (at start date of receiving the combination) range from 30.3 years (MM+SCB) to 35.6 years (GA+SV). Sex percentage, male ranges from 46.1% to 52.2%, and female range from 47.8% to 53.8%. (Table \@ref(tab:Table3))
+
+```{r, Table3}
+aed_final %>%  #patient characteristics
+  group_by(key) %>%
+  summarise(age_mean = mean(age) , age_median = median(age), 
+            male = sum(S103_GENDER == 1)/n()*100 , female = sum(S103_GENDER == 2)/n()*100) %>% 
+  kable(format = "pandoc", caption = "Demographic characteristics of the patient cohort. GA indicates gamma-aminobutyric acid analogs; SCB, sodium channel blockers; MM, multiple mechanisms; and SV, synaptic vesicle protein 2A binding.")
+```
+
+On the other hand, the final study cohort in this study who meet all study criteria consisted of 3698 patients with 14,371 trials. The frequencies of MOA-based AEDs trials in this cohort, the most to least frequently used, were SCB combinations (72.39%), GA combinations (42.72%), MM Combinations (41.05%), SV combinations (27.74%). The most frequently used combinations were GA+SCB (23.05%), MM+SCB (22.92%) and least combination was GA+GA (3.96%) (Table \@ref(tab:Table4)) (Figure \@ref(fig:Figure5)).     
+
+```{r Figure5,fig.cap="Frequencies of MOA-based combination trials among EpiPGX's study patients. GA indicates gamma-aminobutyric acid analogs; SCB, sodium channel blockers; MM, multiple mechanisms; and SV, synaptic vesicle protein 2A binding."}
+ggplot(aed_final, aes(key)) +   
+  geom_histogram(stat='count') +
+  xlab("Mode of action combinations") +
+  ylab("Number of patients")
+```
+
+```{r Table4}
+aed_final %>%  
+  group_by(key) %>%
+  summarise(aed_trials = n() , trials_per = aed_trials/nrow(aed_final)*100,
+            patient_count= n_distinct(S_FKEY), patient_per = patient_count/3788*100) %>% 
+  kable(format = "pandoc", caption = "Clinical details of the patient cohort. AED indicates antiepileptic drug.")
+```
+
+## Drug persistence
+
+```{r Table5}
+aed_final %>%  #persistence by MOA
+  group_by(key)  %>% summarise(per_mean= mean(int_days) , per_median= median(int_days) ) -> comb_per
+comb_per %>% 
+kable(format = "pandoc",caption = "Duration of AED combination therapy. GA indicates gamma-aminobutyric acid analogs; SCB, sodium channel blockers; MM, multiple mechanisms; and SV, synaptic vesicle protein 2A binding.")
+```
+ 
+Our results showed that the mean treatment duration ranged from 1060 (MM+SV) to 1777 (GA+SCB). Therapies that have the highest duration are GA+SCB (`r comb_per %>% filter(key == "GA+SCB") %>%  pull(per_mean)` days) and MM+SCB (`r comb_per %>% filter(key == "MM+SCB") %>%  pull(per_mean)` days), while the lowest are MM+SV (`r comb_per %>% filter(key == "MM+SV") %>%  pull(per_mean)` days) and GA+SV (`r comb_per %>% filter(key == "GA+SV") %>%  pull(per_mean)` days) (Table \@ref(tab:Table5)).
+Zhixiao et al. results revealed that cohorts who received different-MOA combinations had longer mean and median persistence compared with cohorts receiving same-MOA combinations. Contrary to this, our observations are inconsistent with Zhixiao et al. observation, cohorts receiving same-MOA combinations have longer mean persistence than different-mode of action (Figure \@ref(fig:Figure6)). For example, mean of GA+GA (`r comb_per %>% filter(key == "GA+GA") %>%  pull(per_mean)` days) has longer duration than GA+SV (`r comb_per %>% filter(key == "GA+SV") %>%  pull(per_mean)` days); and the mean of SCB+SCB (`r comb_per %>% filter(key == "SCB+SCB") %>%  pull(per_mean)` days) has longer duration than SCB+SV (`r comb_per %>% filter(key == "SCB+SV") %>%  pull(per_mean)` days) (Table \@ref(tab:Table5)). However, previous studies described that most of survival data are skewed do not follow normal distribution. Furthermore, (Figure \@ref(fig:Figure7)) reveals that distribution of our data is skewed, for instance GA+GA distribution is right skewed. We decided to perform survival analysis such as Kaplan-Meier estimation and Cox proportional hazard model based on our data distribution; Kaplan Meier is widely used as nonparametric estimator. 
+
+
+
+```{r Figure6,fig.cap="Persistence by mode of action combination category."}
+aed_final %>%  #persistence by MOA
+  group_by(key)  %>% summarise(per_mean= mean(int_days) , per_median= median(int_days) ) %>%
+  gather(key = "persistence" , value = "value" , - key) %>% 
+  filter(key != "MM+MM")  %>%
+  ggplot(aes(x = key, y = value , fill = persistence)) +
+    geom_bar(stat = "identity",position="dodge2") +
+    scale_fill_manual(values=c('#999999','#56B4E9'))+
+  xlab("Mode of action combinations") +
+  ylab("Time (day)")
+```
+
+```{r Figure7,fig.cap="Distribution of AED combination therapy."}
+aed_final %>% 
+  filter(key != "MM+MM")  %>%
+  ggplot() + geom_density(alpha = 0.2, aes(log2(as.numeric(int_days))) ) +
+  facet_wrap(~key) +
+  ylab("Density") +
+  xlab("Log Time (day)")
+```
+
+## Survival analysis
+
+```{r Figure8,fig.cap="Kaplan Meier survival curves of persistence comparisons among AEDs combinations for GA combination. "}
+
+aed_censor <- aed_final %>% 
+  mutate(censor = case_when(
+    str_detect(D115_END_NA.x, "ongoing")  & str_detect(D115_END_NA.y, "ongoing") ~ 1,TRUE ~ 2))
+
+#Kaplan Meyer
+#surv_object <-Surv(time = aed_censor$int_days, event = aed_censor$censor)
+#model1: GA trials and GA+GA is the reference
+
+aed_censor_ga <- aed_censor %>% filter(str_detect(key, "GA")) %>% filter(int_days < 9500)
+aed_censor_ga$key <- factor(aed_censor_ga$key)
+aed_censor_ga$key <- relevel(aed_censor_ga$key, "GA+GA")
+surv_object_ga <-Surv(time = aed_censor_ga$int_days, event = aed_censor_ga$censor)
+fit1 <- survfit(surv_object_ga  ~ key , data = aed_censor_ga)
+names(fit1$strata) <- str_remove(names(fit1$strata),"key=")
+
+ ggsurvplot(fit1, data = aed_censor_ga, pval = TRUE,
+           #xlim = c(0,6000),
+           scale_colour_brewer = "Dark2")+
+  ylab("Persistence probability") +
+  xlab ("Time (days)")
+```
+
+```{r Table6}
+as.data.frame(summary(fit1)$table[,c('records','events','median','0.95LCL','0.95UCL')]) -> kap_ga
+
+kap_ga%>%   
+  kable(format = "pandoc", booktabs = T,caption = "Table include number of trial and number of events and median persistence time for GA combinations.") %>%
+  kable_styling(position = "center")
+```
+
+```{r Figure9,fig.cap="Kaplan Meier survival curves of persistence comparisons among AEDs combinations for SCB combination. Table include number of trial and number of events and median persistence time."}
+#model2: SCB trials and SCB+SCB is the reference
+aed_censor_sc <- aed_censor %>% filter(str_detect(key, "SCB")) %>% filter(int_days < 9500)
+aed_censor_sc$key <- factor(aed_censor_sc$key)
+aed_censor_sc$key <- relevel(aed_censor_sc$key, "SCB+SCB")
+surv_object_sc <-Surv(time = aed_censor_sc$int_days, event = aed_censor_sc$censor)
+fit2 <- survfit(surv_object_sc ~ key , data = aed_censor_sc)
+names(fit2$strata) <- str_remove(names(fit2$strata),"key=")
+
+ggsurvplot(fit2, data = aed_censor_sc, pval = TRUE,
+           #xlim = c(0,10000),
+           scale_colour_brewer = "Dark2") + 
+      ylab("Persistence probability") +
+      xlab ("Time (days)")
+```
+
+```{r Table7}
+as.data.frame(summary(fit2)$table[,c('records','events','median','0.95LCL','0.95UCL')])  -> kap_scb
+
+kap_scb%>% 
+  kable(format = "pandoc", booktabs = T,caption = "Table include number of trial and number of events and median persistence time for SCB combinations.") %>%
+  kable_styling(position = "center")
+```
+
+The Kaplan Meier survival curves comparing treatment persistence with AEDs combinations over time (days) are shown in Figure 3. As expected, different-MOA combinations had higher persistence than same-MOA combination. In GA combination model, therapies combinations GA+SV, GA+SCB, and GA+MM (median persistence time, `r kap_ga$median[4]` days, `r kap_ga$median[3]` days, `r kap_ga$median[2]` days, respectively) had significantly higher persistence than GA+GA combination (median persistent time, `r kap_ga$median[1]` days). Similarly, In SCB combination model, therapies combinations SCB+SV, SCB+MM, or SCB+GA (median persistent time, `r kap_scb$median[4]` days, `r kap_scb$median[3]` days, `r kap_scb$median[2]` days, respectively) had significantly higher persistence than SCB+SCB combination (median persistent time, `r kap_scb$median[1]` days). All findings are statistically significant (p<0.001). (Figure \@ref(fig:Figure8), Figure \@ref(fig:Figure9), (Table \@ref(tab:Table6)), (Table \@ref(tab:Table7)))
+
+\newpage
+
+```{r Figure10,fig.cap="Multivariate Cox proportional hazards regression model for risk of non-persistence for GA combinations."}
+
+# Cox proportional hazard
+#model1 > GA trials and GA+GA is the reference
+fit.coxph_1 <- coxph(surv_object_ga  ~ key , data = aed_censor_ga)
+
+ggforest(fit.coxph_1, data = aed_censor_ga)
+
+summary(fit.coxph_1)  -> sum_cox1
+sum_cox1$coefficients -> prop1
+rownames(prop1) = str_remove(rownames(prop1),"key")
+prop1 <- setDT(as.data.frame(prop1), keep.rownames = TRUE)
+colnames(prop1) = c("GA_combination","coef","coeff" ,"se","z_score","P")
+sum_cox1$conf.int -> cox1
+rownames(cox1) = str_remove(rownames(cox1),"key")
+cox1 <- setDT(as.data.frame(cox1), keep.rownames = TRUE)
+colnames(cox1) = c("GA_combination","HR","coeff" ,"lower_CI","upper_CI")
+p_value_output <- function(p_value){
+  p_value <- case_when(p_value < 0.001 ~ "< 0.001",
+                       TRUE ~ sprintf("%.3f", p_value))
+  return(p_value)
+}
+```
+
+```{r Table8}
+cox1 %>% select(-coeff) %>% left_join(prop1 %>% select(GA_combination,P) %>% 
+            mutate( P = p_value_output(P),
+                    reference = "GA+GA"), by= c("GA_combination"="GA_combination")) %>% 
+               select(GA_combination,reference,HR ,lower_CI,upper_CI, P) -> cox_ga
+  cox_ga %>% 
+  kable(caption = "Hazard Ratios of GA combination therapy discontinuation.", align = c("llrrrr"))
+```
+
+```{r,Figure11,fig.cap="Multivariate Cox proportional hazards regression model for risk of non-persistence for SCB combinations."}
+#model2 > SCB trials and SCB+SCB is the reference
+
+fit.coxph_2 <- coxph(surv_object_sc  ~ key , data = aed_censor_sc)
+
+ggforest(fit.coxph_2, data = aed_censor_sc)
+
+summary(fit.coxph_2)  -> sum_cox2
+sum_cox2$coefficients -> prop2
+rownames(prop2) = str_remove(rownames(prop2),"key")
+prop2 <- setDT(as.data.frame(prop2), keep.rownames = TRUE)
+colnames(prop2) = c("SCB_combination","coef","coeff" ,"se","z_score","P")
+sum_cox2$conf.int -> cox2
+rownames(cox2) = str_remove(rownames(cox2),"key")
+cox2 <- setDT(as.data.frame(cox2), keep.rownames = TRUE)
+colnames(cox2) = c("SCB_combination","HR","coeff" ,"lower_CI","upper_CI")
+```
+
+```{r Table9}
+cox2  %>% select(-coeff) %>% left_join(prop2 %>% select(SCB_combination,P) %>% 
+  mutate( P = p_value_output(P),
+          reference = "SCB+SCB"), 
+  by= c("SCB_combination"="SCB_combination")) -> cox_scb
+
+cox_scb %>% 
+    select(SCB_combination,reference,HR ,lower_CI,upper_CI, P) %>% 
+  kable(caption = "Hazard Ratios of SCB combination therapy discontinuation.", align = c("llrrrr"))
+```
+
+The Cox proportional hazards models examining time to discontinuation of therapy showed different-MOA combinations with a lower hazard of discontinuation compared with same-MOA combinations. In GA combination model, using GA+GA as a reference, patients receiving GA+MM, GA+SCB or GA+SV (hazard ratio, `r cox_ga %>% filter(GA_combination == "GA+MM") %>% pull("HR")`, `r cox_ga %>% filter(GA_combination == "GA+SCB") %>% pull("HR")`, `r cox_ga %>% filter(GA_combination == "GA+SV") %>% pull("HR")`, respectively) were significantly less likely to discontinue their combination compared with G+G patients. Similarly, using SCB+SCB as a reference group, patients receiving SCB+GA, SCB+MM or SCB+SV (hazard ratio, `r cox_scb %>% filter(SCB_combination == "GA+SCB") %>% pull("HR")`, `r cox_scb %>% filter(SCB_combination == "MM+SCB") %>% pull("HR")`, `r cox_scb %>% filter(SCB_combination == "SCB+SV") %>% pull("HR")`, respectively) were significantly less likely to discontinue their combination compared with SCB+SCB patients. All findings are statistically difference (p<0.001). (Figure \@ref(fig:Figure10), Figure \@ref(fig:Figure11), Table \@ref(tab:Table8), Table \@ref(tab:Table9))
+
+```{r Table10}
+aed_final %>%
+  filter(D140_OUTCOME.y == D140_OUTCOME.x) %>%
+  count( key, D140_OUTCOME.x) %>% 
+  spread(D140_OUTCOME.x, n)  -> out_comb
+
+out_comb %>% select(-key) %>% rowSums() -> sum
+cbind(out_comb,sum) -> out_comb
+colnames(out_comb) <- c("AED combination","Response","Failure","Unclassified","unknown","Total") 
+out_comb %>% 
+  mutate(per = Response/Total * 100) %>% select(`AED combination`,Response,per) -> out_comb
+
+out_comb %>% filter(str_detect(`AED combination`,"GA")) %>% 
+  kable(format = "pandoc", booktabs = T, caption = "Outcome of GA combination trial.")
+```
+
+```{r Table11}
+out_comb %>% filter(str_detect(`AED combination`,"SCB")) %>% 
+  kable(format = "pandoc", booktabs = T, caption = "Outcome of SCB combination trial.")
+```
+
+# Discussion
+
+This study describes antiepileptic drug (AED) combination therapy based on their mode of action (MOA) in European cohort, and evaluating the differences in outcomes comparing different-MOA combination therapy with same-MOA combination therapy for patients with epilepsy. The data provide a unique picture of AED combination prescription patterns in Western Europe over the last decades. Data were collected over 82 years from 1933 to 2015 from multiple sites but stored in a single database containing detailed data on AED trials, and allowing for uniform data capture and extraction[@Androsova2017]. We applied strict inclusion criteria for case identification and qualifying AED combination trials. Our study provides comparative effectiveness among AEDs combinations which assessed by the persistence of the medications, and this clinical trial analysis provides detail of outcomes needed to inform drug-choice decisions.  
+The choice of optimal AED combination poses difficulty for different reasons. First, there are limited data regarding favourable or unfavourable combination. Second, guidelines for choosing AED combination do not exist; thus clinician´s choice for addon AED determined by his or her comfort with the AED chosen first for monotherapy. This may result in combinations of AEDs that are idiosyncratic for each clinician. Theoretically, the concept of implementing guidelines for choosing AED combination based on MOA be difficult because many AEDs have multiple mechanisms. Thirdly, there is no substantial evidence whether different-MOA combinations are more effective than same-MOA combinations.
+
+We found that effectiveness of MOA-based-AED combination, as evaluated by persistence, was significantly better among different-MOA combination than same-MOA combinations. These finding is consistent with previous studies and Zhixiao’s study[@Brodie2011; @Investigation2015]. Patient receiving SCB+SV2 had the longest median persistent time (1305 days) with lowest discontinuation risk (hazard ratio, 0.747). Patients receiving G+G had the lowest median persistent time (730 days) with the highest discontinuation risk. Combination of SCB+SCB had the third lowest median persistent time (755 days) with higher risk of discontinuation.
+
+Combinations including an SCB were prescribed for 72.39% of patients, with only 12.14% of these patients receiving an SCB+SCB combination vs an SC combination with a different MOA. Of the patients receiving a combination containing G, only 3.96% of the combinations were a G+G same-MOA combination. The findings suggest that different-MOA–based combination AED therapies have been the most common in clinical practice whether or not by conscious awareness of the MOAs by the prescriber [@Lee2010]. 
+
+These findings of favouring the use of same-MOA combinations is consistent with our data outcome. Of the patients receiving a combination containing G, only 3.21% of the GA+GA combinations were responding, while 5.78%, 5.56%, and 3.65% were responding of GA+MM, GA+SCB, and GA+SV combinations respectively . (Table \@ref(tab:Table10), Table \@ref(tab:Table11))
+
+The most likely explanation is that same MOA affects nearly convergent targets or receptors other than different ones.  Furthermore, same-MOA combinations may have similar adverse effects; such combinations may cause exacerbation of adverse effects. For example, the use of carbamazepine and oxcarbazepine combination may exacerbate hyponatremia[@Berghuis2017]
+
+# Conclusion
+
+These findings suggest that AED combinations with different MOAs have greater effectiveness, as measured by treatment persistence, and lower risks for therapy discontinuation, suggesting a strategy for achieving optimal AED combination therapy outcomes that is based on different MOAs rather than the same MOAs. Further research is needed to more fully understand the role of the MOA in achieving optimal outcomes in AED combination therapy and to involve the impact of these therapies on different epilepsy classes.
+
+\newpage
+
+# References
+
